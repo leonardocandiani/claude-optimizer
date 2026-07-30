@@ -38,9 +38,23 @@ By default every script targets `$CLAUDE_CODE_CONFIG_DIR` if set, otherwise `~/.
 node scripts/audit.mjs
 node scripts/audit.mjs --dir ./my-project/.claude
 node scripts/audit.mjs --json > audit.json
+node scripts/audit.mjs --lang pt                  # force a language
 ```
 
-Read-only. Reports the context budget (always-loaded vs conditional vs on-demand bytes), whether the three-layer architecture is in place, dead pointers, duplication candidates, contradiction candidates, and conditional-rule candidates. See "What it measures" below for what each of these means and how it is computed.
+Read-only. Reports the context budget (always-loaded vs conditional vs on-demand bytes), **the always-loaded documents listed largest first**, whether the three-layer architecture is in place, dead pointers, duplication candidates, contradiction candidates, and conditional-rule candidates. See "What it measures" below for what each of these means and how it is computed.
+
+The text report is translated (see "Language" below); `--json` is the machine surface and stays in English. The document list is the part you act on:
+
+```
+ALWAYS-LOADED DOCUMENTS, LARGEST FIRST
+  23 document(s), 99754 bytes in total. Any diet starts at the top of this list:
+      bytes   share  document
+      11476   11.5%  @context/pessoal-vs-profissional.md
+       9280    9.3%  @context/trabalho.md
+       8740    8.8%  CLAUDE.md
+```
+
+A total on its own only tells you a diet is needed. The list tells you where to start, and it is what the distillation pass below asks you to read.
 
 ### Migrate model IDs
 
@@ -48,9 +62,17 @@ Read-only. Reports the context budget (always-loaded vs conditional vs on-demand
 node scripts/migrate-models.mjs                       # dry-run, scans your config
 node scripts/migrate-models.mjs --dir ./src            # dry-run, scans a project
 node scripts/migrate-models.mjs --dir ./src --apply    # writes replacements, backs up first
+node scripts/migrate-models.mjs --dir ~/.claude --include-runtime   # rarely what you want
+node scripts/migrate-models.mjs --lang pt                           # report in Portuguese
 ```
 
 Finds retired (HTTP 404), deprecating, and outdated-but-still-active Claude model ID strings and proposes the current one. When a match resolves to `claude-opus-5`, it also prints a checklist of the API-level breaking changes worth checking by hand (see `references/api-migration.md`). `--apply` rewrites the strings in place; every changed file is backed up under `_archive/model-migration-<timestamp>/` first.
+
+**Runtime data is not configuration.** When the scanned path sits inside a Claude Code config directory, these are skipped by default: `.claude.json`, cache files (`*-cache.json`), and the `projects/`, `jobs/`, `session-env/`, `telemetry/`, `sessions/`, `shell-snapshots/`, `statsig/`, `file-history/`, `paste-cache/` and `cache/` directories. A session transcript records which model actually ran a session that already happened; rewriting it does not migrate anything, it edits a historical record. The report says how many files were skipped, and says it again immediately above the invitation to run `--apply`. `--include-runtime` scans them anyway. Pointing `--dir` at an ordinary project is unaffected: the full tree is scanned, including folders that happen to be called `projects/` or `cache/`.
+
+**A scan that read nothing says so.** If the skip above ate every file, or the path holds nothing readable, the report does not fall through to "no outdated or retired model IDs found" — it names the reason, points at the way out, and exits `2`. An empty result and a scan that never happened look identical from the outside, and only one of them is good news.
+
+The report is translated (`--lang`, `CLAUDE_OPTIMIZER_LANG`, the `language` field of the config being scanned, `LC_ALL`/`LC_MESSAGES`/`LANG`, then English), including the severity tags and the API breaking-change hints. Someone being asked to authorise a write into their own configuration should be able to read the warning first. `--json` stays in English: machine interface.
 
 ### Apply the safe fixes
 
@@ -114,7 +136,7 @@ Portuguese markdown); override it with `--ratio` if your config is mostly code o
 
 ## Language
 
-The report speaks the user's language, detected automatically in this order:
+The reports speak the user's language. `audit.mjs` and `impact.mjs` both go through `locales/`, detected automatically in this order:
 
 1. `--lang <code>` on the command line
 2. `CLAUDE_OPTIMIZER_LANG` in the environment
@@ -122,9 +144,13 @@ The report speaks the user's language, detected automatically in this order:
 4. `LC_ALL`, `LC_MESSAGES` or `LANG`
 5. English
 
-Numbers follow the same locale, which matters more than it sounds: `8.432.263.481` and
-`8,432,263,481` are the same number to a machine and two very different numbers to a
-person reading quickly.
+In `impact.mjs`, numbers follow the same locale, which matters more than it sounds:
+`8.432.263.481` and `8,432,263,481` are the same number to a machine and two very
+different numbers to a person reading quickly. `audit.mjs` deliberately does the opposite
+and prints raw digits in every language: an audit figure gets pasted into issues, diffs and
+commit messages, where an unambiguous `99754` beats a locale-correct `99.754`.
+
+`--json` output is never translated, in either script. It is the machine surface.
 
 Shipping today: English (`en`), Portuguese (`pt`), Spanish (`es`).
 
@@ -135,31 +161,76 @@ ship and safe to merge.
 
 ## What it measures
 
-### Context budget (capability A)
+### Context budget
 
-- **Always loaded**: `CLAUDE.md` bytes plus every file in `rules/` that does not have a `paths:` key in its YAML frontmatter. This is what Claude reads on every single turn.
-- **Conditional**: every `rules/*.md` file that does have a `paths:` key. Loaded only when a file matching one of those globs is part of the current work.
-- **On demand**: every file in `references/`. Loaded only when the agent chooses to read it.
-- Skill count (directories under `skills/`, symlinks included) and context-card count (files under `context/`, if present) are reported for completeness, they are not part of the always-loaded byte total since Claude Code injects them conditionally too.
+- **Always loaded**: `CLAUDE.md` bytes, plus every file in `rules/` that does not have a `paths:` key in its YAML frontmatter, plus every file `CLAUDE.md` pulls in with an `@import` line (transitively, up to four hops), **whether or not that imported file declares `paths:` of its own**. This is what Claude reads on every single turn. Configs that use `@import` instead of a `rules/` directory are common, and counting only CLAUDE.md for one of those reports a fraction of the real weight.
+- **Always-loaded documents, largest first**: the breakdown behind that total, with each document's bytes and share. This is the list to work through when distilling.
+- **Conditional**: every `rules/*.md` file that has a `paths:` key **and is not also imported**. Loaded only when a file matching one of those globs is part of the current work.
+- **`paths:` that is being ignored**: a file that declares `paths:` and arrives through an `@import` anyway. The declaration does nothing there and the file loads in full on every session, which is almost always the opposite of what its author intended, so it gets its own warning with the fix (move it into `rules/`, delete the `@import` line).
+- **On demand**: every file in `references/`, plus the files in `context/` that nothing imports. Loaded only when the agent chooses to read them.
+- Skill count (directories under `skills/`, symlinks included) and context-card count (files under `context/`, if present) are reported for completeness. Context cards are only outside the always-loaded total when `CLAUDE.md` does not import them: an imported card is always loaded and is counted in the always-loaded line, not here.
+- **Broken imports**: an `@import` pointing at a file that does not exist, or at an extension Claude Code will not inline, loads nothing and says nothing. Those are reported with the dead pointers, since the rule silently stops existing while the user still believes it is in force.
 
-### Dead pointers (capability B)
+### Dead pointers
 
-Every path matching `rules/...`, `references/...`, `hooks/...`, or `skills/...` cited inside `CLAUDE.md` or a rule file is resolved against the filesystem. A miss is reported with the file that cited it and the path it expected. This pattern match is intentionally narrow (only these four prefixes) to avoid false positives on ordinary prose; a bare filename mentioned without one of those prefixes is out of scope.
+Every path matching `rules/...`, `references/...`, `hooks/...`, `skills/...`, `context/...`, `commands/...` or `agents/...` cited inside `CLAUDE.md`, a rule file or an imported file is resolved against the filesystem. A miss is reported with the file that cited it and the path it expected. This pattern match is intentionally narrow (only these prefixes, and always with at least one path segment after the slash) to avoid false positives on ordinary prose; a bare filename mentioned without one of those prefixes is out of scope. Broken `@import` lines are reported in the same section and marked as such.
 
-### Duplication and contradiction candidates (capability C)
+### Duplication and contradiction candidates
 
-Both are heuristics over the always-loaded documents (`CLAUDE.md` plus rules without `paths:`), and both are reported as candidates for human review, never as certainties:
+Both are heuristics over the always-loaded documents (`CLAUDE.md`, rules without `paths:`, and the files imported with `@`), and both are reported as candidates for human review, never as certainties:
 
-- **Duplication**: sentences from `CLAUDE.md` and a rule are compared with a word-overlap (Jaccard) score; pairs above a similarity threshold are flagged.
+- **Duplication**: sentences from `CLAUDE.md` and an always-loaded rule or imported file are compared with a word-overlap (Jaccard) score; pairs above a similarity threshold are flagged.
 - **Contradiction**: lines are scanned for a fixed list of action-verb stems (delete, commit, push, ask, edit, overwrite, skip) combined with "never"/"nunca" or "always"/"sempre". A "never delete X" in one file and an "always delete X" (or similar) in another, with enough word overlap, is flagged. This is a small, fixed pattern list, not exhaustive, and it is explicitly not proof of an actual contradiction, someone still has to read both lines.
 
-### Conditional-rule candidates (capability C)
+### Conditional-rule candidates
 
 A rule qualifies when its content is dominated by exactly one file-type keyword family (tests, lint, migrations, CSS, TypeScript, Python, SQL, Docker) with enough hits to be a real signal, and it does not already have a `paths:` block. The suggested globs are a starting point, not a final answer, review them before applying.
 
-### Model ID migration (capability D)
+Counting is deliberately conservative, because a keyword only means "this file is about X" when X is being *used*, not when it is being *quoted as the thing to avoid*. Two kinds of occurrence are discarded before counting:
+
+- anything inside code (fenced blocks, indented blocks, inline `` `spans` ``), which is where anti-pattern samples are almost always written;
+- whole lines carrying an example or negation marker (`exemplo`, `ex.:`, `anti-padrão`, `NUNCA`, `never`, `não faça`, `do not`, `don't`, `❌`).
+
+This came from a real false positive. A live safety rule forbidding "kill a process by generic name on a machine running several projects" was flagged as *"Python content, 13 keyword hits"* and proposed for unloading, purely because it spells the anti-pattern out as `` `coletor.py` `` and `` `main.py` ``. Both filters only ever remove hits, so the error can only fall on the safe side: the tool suggests less than it could, never more.
+
+For the same reason, both candidate sections state a **candidate** and print a caution, rather than issuing an instruction. A heuristic that tells you to delete something is one bad classification away from doing damage.
+
+### Why `paths:` never saves an imported file
+
+This is the one place where getting the model wrong produces a number that is not just
+imprecise but backwards, so it was settled by experiment rather than by reading.
+
+**Verdict: `paths:` works in `rules/` and is ignored on a file that arrives through
+`@import`.** A 2×2 controlled test on Claude Code v2.1.220, run twice with identical
+results: four fixture files, each carrying a unique invented token, two reached by
+`@import` and two living in `.claude/rules/`, one of each pair declaring a `paths:` glob
+matching nothing. The session was then asked which tokens were present, with
+`Read`, `Bash`, `Glob`, `Grep`, `Task`, `WebFetch`, `Edit` and `Write` disabled, so a token
+could only be named if it had genuinely been injected into the context rather than read
+off disk. The `rules/` file with the non-matching `paths:` did **not** appear, which is the
+positive control proving the gate works and works only there. The imported file with the
+very same frontmatter **did**.
+
+So provenance decides, never the frontmatter:
+
+| Where the file comes from | `paths:` in its frontmatter | Counted as |
+|---|---|---|
+| `rules/`, not imported | matches nothing right now | **Conditional** — genuinely off |
+| `rules/`, also `@import`ed | ignored | **Always loaded**, in full |
+| `@import` from `CLAUDE.md` | ignored | **Always loaded**, in full |
+
+Earlier versions zeroed the cost of an imported file that declared `paths:`. That is
+under-reporting dressed as a saving: the byte count improves, the context is spent anyway,
+and nothing anywhere says so. One residual is left in on purpose: the frontmatter block is
+stripped before injection, so counting the whole file overestimates by a few dozen tokens.
+That error falls on the safe side, and removing it is not worth the risk of reintroducing
+the under-reporting.
+
+### Model ID migration
 
 Model ID tables (retired, deprecating, outdated, current) are the published Anthropic migration data, not invented. Matching is word-boundary-safe so a shorter ID is never mistakenly matched inside a longer one. The default scan surface, when no `--dir` is given, is deliberately narrow: it covers `CLAUDE.md`, `rules/`, `references/`, `commands/`, `agents/`, `hooks/`, `context/`, `output-styles/`, `settings.json`, and `settings.local.json`, not the entire `~/.claude` runtime directory (which can hold tens of thousands of session and cache files) and not the bundled `skills/` library (skills often ship migration-guide documentation that intentionally mentions retired IDs as examples). Pass `--dir` explicitly to scan any other path in full, including a specific skill you wrote yourself.
+
+Passing `--dir` at a config directory is the one case where "in full" would be wrong, and it is handled: runtime data is skipped there by default and the count of skipped files is reported (see "Migrate model IDs" above).
 
 ## Safety model
 
@@ -170,6 +241,25 @@ Every script defaults to dry-run: it reports what it found or what it would do, 
 - `apply.mjs` additionally writes a `report.json` inside its backup folder recording exactly what changed and why.
 
 If a change turns out wrong, the previous version of the file is sitting in `_archive/`, restore it by hand.
+
+## Tests
+
+```sh
+node tests/run.mjs
+```
+
+Plain Node, no dependencies, no install step, same as the scripts. Every test builds its own fixtures at run time in its own temporary directory and removes only what it created, so the suite never reads or writes a real Claude Code config. It prints how many checks passed and failed per file plus a final summary, and exits non-zero if anything failed.
+
+What is covered, and why each one is there:
+
+| File | Guards against |
+|---|---|
+| `imports.test.mjs` | prose mentioning `@import` becoming a phantom import; import cycles looping; a broken import leaking into the dead-pointer list; an imported `paths:` file being counted as free; measurement depending on the order of the `@` lines |
+| `legacy-format.test.mjs` | a classic `rules/` + `references/` config measuring differently than it always did, with every expected byte derived from the fixture the test just wrote |
+| `topic-detector.test.mjs` | the false positive that proposed unloading a safety rule, and its opposite, a detector so timid it finds nothing |
+| `apply-safety.test.mjs` | `apply.mjs` writing `paths:` into an imported file, plus the positive control that it still corrects a non-imported one |
+| `migrate-runtime.test.mjs` | session transcripts and `.claude.json` being treated as configuration, and the reverse, an ordinary project being partially skipped |
+| `i18n.test.mjs` | a translation key with no entry (the report would print the raw key), a locale silently losing keys, and a placeholder mangled in translation |
 
 ## The core of it: the distillation pass
 

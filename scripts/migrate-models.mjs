@@ -6,6 +6,15 @@
 //
 // Usage:
 //   node scripts/migrate-models.mjs [--dir <path>]... [--apply] [--json]
+//                                   [--include-runtime] [--lang <code>]
+//
+// The text report goes through the same translator as audit.mjs and impact.mjs
+// (--lang, then CLAUDE_OPTIMIZER_LANG, then the `language` field of the config
+// being scanned, then LC_ALL/LC_MESSAGES/LANG, then English). This half of the
+// tool is the half that offers to WRITE into the user's own configuration, so
+// leaving its risk warnings in a language the owner does not read would mean
+// asking them to accept a risk they cannot read. --json is deliberately NOT
+// translated: it is a machine interface.
 //
 // With no --dir, scans only the paths that make up the user's own config
 // (CLAUDE.md, rules/, references/, commands/, agents/, hooks/, context/,
@@ -16,14 +25,25 @@
 // Pass --dir explicitly (repeatable) to scan project directories in full,
 // including ~/.claude/skills/<name> if you want to check a specific skill.
 //
+// --dir on a config directory is the one case where "in full" is wrong, and
+// it used to be taken literally: the walk reached .claude.json, the statistics
+// caches and every session transcript under projects/. Rewriting the model ID
+// inside a transcript of a session that already ran is not a migration, it is
+// editing a historical record. Runtime paths are therefore skipped whenever the
+// scanned root sits inside a config directory, the count of skipped files is
+// printed before the --apply invitation, and --include-runtime is there for
+// anyone who really wants them. Scanning an ordinary project is untouched.
+//
 // Default is dry-run: nothing is written unless --apply is passed, and even
 // then every changed file is backed up first under
 // _archive/model-migration-<timestamp>/ next to the directory it came from.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { resolveConfigDir, defaultConfigScanRoots } from './lib/config-dir.mjs';
+import { resolveConfigDir, defaultConfigScanRoots, flagValue } from './lib/config-dir.mjs';
 import { walkFiles } from './lib/fs-walk.mjs';
+import { runtimeFilterFor } from './lib/runtime-paths.mjs';
+import { createTranslator } from './lib/i18n.mjs';
 import {
   findModelIdIssues,
   findBreakingPatternHints,
@@ -35,6 +55,7 @@ function parseArgs(argv) {
   const dirs = [];
   let apply = false;
   let json = false;
+  let includeRuntime = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--dir' && argv[i + 1]) {
       dirs.push(path.resolve(argv[++i]));
@@ -42,11 +63,22 @@ function parseArgs(argv) {
       apply = true;
     } else if (argv[i] === '--json') {
       json = true;
+    } else if (argv[i] === '--include-runtime') {
+      includeRuntime = true;
     }
   }
   const explicit = dirs.length > 0;
-  const roots = explicit ? dirs : defaultConfigScanRoots(resolveConfigDir(argv));
-  return { roots, explicit, apply, json };
+  const configDir = resolveConfigDir(argv);
+  const roots = explicit ? dirs : defaultConfigScanRoots(configDir);
+  // The hint that lets a config directory NOT named `.claude` still be
+  // recognised. It must never be the --dir value itself: resolveConfigDir
+  // returns --dir when present, so using it here would declare every explicitly
+  // scanned directory a config root and start skipping folders called
+  // projects/ or cache/ inside ordinary repositories.
+  const envConfigDir = process.env.CLAUDE_CODE_CONFIG_DIR
+    ? path.resolve(process.env.CLAUDE_CODE_CONFIG_DIR)
+    : null;
+  return { roots, explicit, apply, json, includeRuntime, configHint: explicit ? envConfigDir : configDir };
 }
 
 function scanFile(file) {
@@ -71,16 +103,21 @@ function filesUnderRoot(root) {
   return { backupBase: root, files: [...walkFiles(root)] };
 }
 
-function scanRoots(roots) {
+function scanRoots(roots, { includeRuntime = false, configHint = null, t = null } = {}) {
   const findings = [];
   let filesScanned = 0;
+  let filesSkippedRuntime = 0;
   for (const root of roots) {
     const info = filesUnderRoot(root);
     if (!info) {
-      console.error(`Warning: path not found, skipping: ${root}`);
+      console.error(t ? t('migrate.warn.pathNotFound', { root }) : `Warning: path not found, skipping: ${root}`);
       continue;
     }
+    // null when this root is not inside a config directory, which is the
+    // ordinary-project case: no filtering, full scan, unchanged behaviour.
+    const isRuntime = includeRuntime ? null : runtimeFilterFor(root, configHint);
     for (const file of info.files) {
+      if (isRuntime && isRuntime(file)) { filesSkippedRuntime++; continue; }
       filesScanned++;
       const { idIssues, breaking } = scanFile(file);
       if (idIssues.length > 0 || breaking.length > 0) {
@@ -88,7 +125,7 @@ function scanRoots(roots) {
       }
     }
   }
-  return { findings, filesScanned };
+  return { findings, filesScanned, filesSkippedRuntime };
 }
 
 function severityCounts(findings) {
@@ -99,60 +136,90 @@ function severityCounts(findings) {
   return counts;
 }
 
-function severityTag(severity) {
-  if (severity === 'retired') return 'RETIRED (404)';
-  if (severity === 'deprecating') return 'DEPRECATING';
-  return 'OUTDATED';
+function severityTag(t, severity) {
+  if (severity === 'retired') return t('migrate.sev.retired');
+  if (severity === 'deprecating') return t('migrate.sev.deprecating');
+  return t('migrate.sev.outdated');
 }
 
-function printFinding(f) {
+function printFinding(t, f) {
   console.log(f.file);
   for (const issue of f.idIssues) {
-    console.log(`  line ${issue.line}: [${severityTag(issue.severity)}] ${issue.id} -> ${issue.replacement}`);
+    console.log(t('migrate.finding.id', {
+      line: issue.line,
+      tag: severityTag(t, issue.severity),
+      id: issue.id,
+      replacement: issue.replacement,
+    }));
   }
   for (const hint of f.breaking) {
-    console.log(`  line ${hint.line}: [API CHECK] ${hint.message}`);
+    console.log(t('migrate.finding.apiCheck', { line: hint.line, message: t(hint.key) }));
   }
   console.log('');
 }
 
-function printOpus5Checklist() {
-  console.log('Opus 5 migration checklist (verify by hand, these are not auto-detected):');
-  console.log('  - budget_tokens is rejected with 400. Use thinking: {type: "adaptive"}.');
-  console.log('  - temperature / top_p / top_k are rejected with 400. Remove them.');
-  console.log('  - assistant-turn prefill (last message with role "assistant") is rejected with 400.');
-  console.log('  - thinking runs on by default and shares max_tokens with the visible response; a low max_tokens can now truncate mid-answer.');
-  console.log('  - if your loop expects one tool_use per turn, set tool_choice: {type: "auto", disable_parallel_tool_use: true}.');
+function printOpus5Checklist(t) {
+  console.log(t('migrate.checklist.heading'));
+  console.log(t('migrate.checklist.budgetTokens'));
+  console.log(t('migrate.checklist.sampling'));
+  console.log(t('migrate.checklist.prefill'));
+  console.log(t('migrate.checklist.thinking'));
+  console.log(t('migrate.checklist.parallelTools'));
   console.log('');
 }
 
-function printReport({ roots, filesScanned, findings, apply }) {
-  console.log('Claude Optimizer -- Model ID Migration Scan');
-  console.log(`Scanned: ${roots.join(', ')}`);
-  console.log(`Files scanned: ${filesScanned}`);
-  console.log(`Mode: ${apply ? 'APPLY (writing changes, backups under _archive/)' : 'dry-run (no changes written)'}`);
+// One line, printed twice on purpose when it is non-zero: once in the header
+// so the file count is honest, and once immediately above the --apply
+// invitation, which is the moment someone decides to let this thing write.
+function runtimeSkipLine(t, filesSkippedRuntime) {
+  return t('migrate.runtimeSkipped', { count: filesSkippedRuntime });
+}
+
+function printReport(t, { roots, filesScanned, filesSkippedRuntime, findings, apply }) {
+  console.log(t('migrate.title'));
+  console.log(t('migrate.scanned', { roots: roots.join(', ') }));
+  console.log(t('migrate.filesScanned', { count: filesScanned }));
+  if (filesSkippedRuntime > 0) console.log(runtimeSkipLine(t, filesSkippedRuntime));
+  console.log(apply ? t('migrate.mode.apply') : t('migrate.mode.dryRun'));
   console.log('');
 
+  // Nothing was read, so "nothing is wrong" is not something this run knows.
+  // Printing the clean bill of health here is the difference between a scan
+  // that found no problem and a scan that never happened -- and the reader
+  // who trusts the closing sentence never goes back to check the counter.
+  if (filesScanned === 0) {
+    console.log(t('migrate.noFilesScanned.warning'));
+    console.log(t(filesSkippedRuntime > 0
+      ? 'migrate.noFilesScanned.becauseRuntime'
+      : 'migrate.noFilesScanned.becauseEmpty', { count: filesSkippedRuntime }));
+    return;
+  }
+
   if (findings.length === 0) {
-    console.log('No outdated or retired model IDs found. No breaking-change patterns flagged.');
+    console.log(t('migrate.clean'));
+    if (!apply && filesSkippedRuntime > 0) {
+      console.log('');
+      console.log(runtimeSkipLine(t, filesSkippedRuntime));
+    }
     return;
   }
 
   const counts = severityCounts(findings);
-  console.log(`Model ID references found: ${counts.retired} retired (404), ${counts.deprecating} deprecating, ${counts.outdated} outdated (active, superseded)`);
+  console.log(t('migrate.counts', counts));
   console.log('');
 
-  for (const f of findings) printFinding(f);
+  for (const f of findings) printFinding(t, f);
 
   const touchesOpus5 = findings.some((f) => f.idIssues.some((i) => i.replacement === 'claude-opus-5'));
-  if (touchesOpus5) printOpus5Checklist();
+  if (touchesOpus5) printOpus5Checklist(t);
 
   if (!apply) {
-    console.log('Dry-run only. Re-run with --apply to write replacements (each changed file is backed up first).');
+    if (filesSkippedRuntime > 0) console.log(runtimeSkipLine(t, filesSkippedRuntime));
+    console.log(t('migrate.dryRunOnly'));
   }
 }
 
-function applyReplacements(findings, timestamp) {
+function applyReplacements(t, findings, timestamp) {
   let filesChanged = 0;
   let replacementsMade = 0;
 
@@ -178,30 +245,44 @@ function applyReplacements(findings, timestamp) {
 
     filesChanged++;
     replacementsMade += appliedCount;
-    console.log(`  UPDATED ${f.file} (${appliedCount} replacement(s), backup: ${dest})`);
+    console.log(t('migrate.applied.file', { file: f.file, count: appliedCount, backup: dest }));
   }
 
   console.log('');
-  console.log(`Applied: ${filesChanged} file(s) changed, ${replacementsMade} replacement(s) total.`);
+  console.log(t('migrate.applied.total', { files: filesChanged, replacements: replacementsMade }));
 }
 
 function main() {
   const argv = process.argv.slice(2);
-  const { roots, apply, json } = parseArgs(argv);
+  const { roots, apply, json, includeRuntime, configHint } = parseArgs(argv);
 
-  const { findings, filesScanned } = scanRoots(roots);
+  // The language comes from the config being scanned, like audit.mjs: scanning
+  // someone else's config reports it in that config's language.
+  const { t } = createTranslator({
+    explicit: flagValue(argv, '--lang'),
+    configDir: resolveConfigDir(argv),
+  });
+
+  const { findings, filesScanned, filesSkippedRuntime } = scanRoots(roots, { includeRuntime, configHint, t });
 
   if (json) {
-    console.log(JSON.stringify({ roots, filesScanned, apply, findings }, null, 2));
+    console.log(JSON.stringify(
+      { roots, filesScanned, filesSkippedRuntime, includeRuntime, apply, findings }, null, 2,
+    ));
   } else {
-    printReport({ roots, filesScanned, findings, apply });
+    printReport(t, { roots, filesScanned, filesSkippedRuntime, findings, apply });
   }
 
   if (apply && findings.length > 0) {
     if (!json) console.log('');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    applyReplacements(findings, timestamp);
+    applyReplacements(t, findings, timestamp);
   }
+
+  // A scan that read nothing proves nothing. Callers that drive this from a
+  // script only ever see the exit code, so it has to be able to say "no
+  // answer" as something other than "all clear".
+  if (filesScanned === 0) process.exitCode = 2;
 }
 
 main();

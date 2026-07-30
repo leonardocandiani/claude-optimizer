@@ -15,7 +15,18 @@ The concrete, load-bearing piece of that model is the three-layer architecture:
 
 1. **CLAUDE.md**: index and invariants. Always loaded, every turn.
 2. **rules/**: always loaded too, UNLESS a rule's frontmatter declares `paths:` globs, in which case Claude Code only loads it when a file matching those globs is in play.
-3. **references/**: loaded only when the agent deliberately reads the file. Zero cost otherwise.
+   **Or `@import` lines**: a config can build this same layer without a `rules/` directory at all, by writing `@context/git.md` inside CLAUDE.md. Claude Code inlines that file into every session, exactly like CLAUDE.md itself, resolving the path against the directory of the file that imports it and following up to four hops of nesting. Import costs the same as pasting the text in: it buys organization, never context. `paths:` frontmatter is a `rules/` feature and an imported file does not obey it, so the only way to take an imported file out of the always-loaded budget is to delete its `@import` line and cite it as an on-demand reference instead.
+
+**Provenance decides, not the frontmatter.** Verified by controlled experiment on Claude Code v2.1.220 (2×2, run twice, identical results; positive control included; measured with file-reading tools disabled so only genuinely injected content could be reported):
+
+| Where the file comes from | `paths:` present | Really costs |
+|---|---|---|
+| `rules/`, not imported | gate works | nothing, on unrelated sessions |
+| `rules/`, also `@import`ed | ignored | the whole file, every session |
+| `@import` from CLAUDE.md | ignored | the whole file, every session |
+
+So a file carrying `paths:` that is pulled in by `@import` is a trap: its author believed they had made it cheap and conditional, and it is fixed weight instead. `audit.mjs` reports these in their own section. The fix is to move the file into `rules/` and delete the `@import` line. Never count such a file as conditional, and never report a saving for it.
+3. **references/**: loaded only when the agent deliberately reads the file. Zero cost otherwise. Files that merely sit in `context/` and are never imported live here too: they cost nothing until something opens them.
 
 A rule with a `paths:` frontmatter block costs nothing on unrelated work:
 
@@ -36,28 +47,39 @@ Run these in order. Every script defaults to dry-run, nothing is written unless 
 ### 1. Audit (`scripts/audit.mjs`)
 
 ```
-node scripts/audit.mjs [--dir <config-dir>] [--json]
+node scripts/audit.mjs [--dir <config-dir>] [--json] [--lang <code>]
 ```
 
-Read-only. Reports:
-- **Context budget**: bytes always loaded (CLAUDE.md + rules without `paths:`), bytes conditional (rules with `paths:`), bytes on demand (references/), skill and context-card counts.
-- **Three-layer architecture**: whether the config actually has all three layers in place.
-- **Dead pointers**: every `rules/*.md`, `references/*.md`, `hooks/*.js`, `skills/<name>` path cited in CLAUDE.md or a rule that does not resolve to a real file. This is the most common and most damaging config defect: telling the agent to open a file that is not there.
-- **Duplication candidates**: near-identical sentences appearing in both CLAUDE.md and an always-loaded rule (heuristic, similarity-scored).
+Read-only. The text report is translated (`--lang`, then `CLAUDE_OPTIMIZER_LANG`, then the audited `settings.json`, then `LC_ALL`/`LC_MESSAGES`/`LANG`, then English); `--json` stays in English. Reports:
+- **Context budget**: bytes always loaded (CLAUDE.md + rules without `paths:` + every file pulled in by `@import`, transitively, `paths:` or not), bytes conditional (rules with `paths:` that are not also imported), bytes on demand (references/ plus the context cards nobody imports), skill and context-card counts.
+- **Always-loaded documents, largest first**: every document behind that total with its bytes and share. Show the user this list, not just the total: it is the input to the distillation pass below, and a total on its own says a diet is needed without saying where to start.
+- **Three-layer architecture**: whether the config actually has all three layers in place, counting an `@import` layer as a legitimate layer 2.
+- **`paths:` being ignored**: files that declare `paths:` and are pulled in by `@import` anyway. Almost always an accident worth telling the user about, since they are paying for it on every session.
+- **Dead pointers**: every `rules/*.md`, `references/*.md`, `hooks/*.js`, `skills/<name>`, `context/*`, `commands/*`, `agents/*` path cited in an always-loaded doc that does not resolve to a real file, plus every broken `@import`. This is the most common and most damaging config defect: telling the agent to open a file that is not there. A broken `@import` is the worst case of it, because the rule stops loading entirely and nothing warns anyone.
+- **Duplication candidates**: near-identical sentences appearing in both CLAUDE.md and another always-loaded doc, rule or imported file (heuristic, similarity-scored).
 - **Contradiction candidates**: pairs of lines across always-loaded docs using opposite polarity ("never" vs "always") on the same action verb (heuristic, always flagged for human review, never asserted as certain).
-- **Conditional-rule candidates**: rules whose content is genuinely dominated by one file-type keyword family (tests, lint, migrations, CSS, ...) and could gain a `paths:` frontmatter block. Dominance is measured by density (share of the words), not raw hit count: a long rule about running a project mentions tests in passing without being a tests rule.
+- **Conditional-rule candidates**: rules whose content is genuinely dominated by one file-type keyword family (tests, lint, migrations, CSS, ...) and could gain a `paths:` frontmatter block. Dominance is measured by density (share of the words), not raw hit count: a long rule about running a project mentions tests in passing without being a tests rule. Occurrences inside code spans, and whole lines carrying an example or negation marker (`exemplo`, `ex.:`, `anti-padrão`, `NUNCA`, `never`, `não faça`, `do not`, `❌`), are discarded before counting, because a keyword quoted as the mistake to avoid is not evidence of the file's topic.
+- **Imported files that could leave the always-loaded budget**: the same detection applied to `@import` files, reported separately because the remedy is different. Never propose `paths:` for one of these: an imported file ignores it. The fix is to delete the `@import` line from CLAUDE.md and cite the file as an on-demand reference. `apply.mjs` refuses to write frontmatter into an imported file even with `--conditional-frontmatter`.
+
+**Both candidate lists are proposals, not instructions, and you must treat them that way.** They print `CANDIDATE` and a caution for a reason: an early version told the user to delete the `@import` of `context/watchdog-nome-generico-cross-project.md`, a live safety rule that forbids killing processes by generic name, only because it quotes `` `coletor.py` `` and `` `main.py` `` as the anti-pattern it exists to prevent. Following that advice would have switched off a working protection while the byte count improved. **Open every candidate and read it before proposing anything to the user**, and say out loud when the heuristic looks wrong.
 
 ### 2. Migrate model IDs (`scripts/migrate-models.mjs`)
 
 ```
-node scripts/migrate-models.mjs [--dir <path>]... [--apply] [--json]
+node scripts/migrate-models.mjs [--dir <path>]... [--apply] [--json] [--include-runtime] [--lang <code>]
 ```
 
 Scans for retired (HTTP 404), deprecating, and outdated-but-active Claude model IDs, and proposes the current replacement. With no `--dir`, scans only the user's own config surface (CLAUDE.md, rules/, references/, commands/, agents/, hooks/, context/, settings.json), not the whole runtime data directory and not the bundled skills library (which legitimately documents old IDs as migration examples). Pass `--dir` (repeatable) to scan a project instead.
 
+**`--dir` at a config directory does not mean the whole tree.** Runtime data there is skipped by default — `.claude.json`, `*-cache.json`, and `projects/`, `jobs/`, `session-env/`, `telemetry/`, `sessions/`, `shell-snapshots/`, `statsig/`, `file-history/`, `paste-cache/`, `cache/` — because a session transcript records which model actually ran a session that already happened, and rewriting it falsifies a record instead of migrating a setting. The report prints how many files it skipped, immediately above the invitation to run `--apply`. `--include-runtime` overrides it. An ordinary project directory is unaffected and is still scanned in full.
+
 When a migration target is `claude-opus-5`, also prints a checklist of the known Opus 5 breaking changes to check by hand (`budget_tokens` removed, `temperature`/`top_p`/`top_k` rejected, assistant prefill rejected, thinking on by default and sharing the `max_tokens` budget, `disable_parallel_tool_use` for one-tool-per-turn loops). Full detail in `references/api-migration.md`.
 
 With `--apply`, rewrites the model ID strings in place. Every changed file is copied to `_archive/model-migration-<timestamp>/` (relative to the scanned root) before being touched. Parameters like `temperature` or `budget_tokens` are flagged but never auto-edited: removing them changes behavior, that is a human call.
+
+**A run that scanned zero files does not report a clean result.** If every file was skipped as runtime data, or the path holds nothing readable, the report says so and exits `2` instead of printing "no outdated or retired model IDs found" — that sentence over a scan that never happened is a clean bill of health nobody earned, and the file counter that contradicts it sits in the header where no one rereads it.
+
+The text report is translated like the rest of the tool (`--lang`, then `CLAUDE_OPTIMIZER_LANG`, then the `language` field of the config being scanned, then `LC_ALL`/`LC_MESSAGES`/`LANG`, then English). This is the half of the tool that offers to write into someone's own configuration, so its risk warnings have to be readable by the person accepting the risk. `--json` stays in English on purpose: it is a machine interface, and wording that shifts per locale is not diffable.
 
 ### 3. Apply (`scripts/apply.mjs`)
 
@@ -86,8 +108,11 @@ optimized" their config when all that ran was the model-ID migration.
 
 ### When to do it
 
-After `audit.mjs`, look at the always-loaded rules sorted by size. Any rule over ~6 KB is a
-candidate. So is `CLAUDE.md` itself if it is over ~15 KB.
+After `audit.mjs`, look at the "ALWAYS-LOADED DOCUMENTS, LARGEST FIRST" section it prints,
+rules and `@import` files alike. Any of them over ~6 KB is a candidate. So is `CLAUDE.md`
+itself if it is over ~15 KB.
+For an imported file, step 5 below changes shape: the pointer replaces the `@import` line,
+it does not sit next to it.
 
 ### The one question that decides everything
 
@@ -144,6 +169,12 @@ mix of three things, and they belong in three different places:
 - **Compressing into vagueness.** "Be careful with deploys" is shorter than the original and
   worth nothing. A distilled rule is still specific and still actionable; you removed the
   catalogue, not the content.
+- **Suggesting `paths:` for an imported file.** It is a `rules/` mechanism, confirmed by the
+  experiment above. Written into a file that CLAUDE.md pulls in with `@`, it changes nothing at
+  all: the same bytes keep loading on every session while the report claims a saving. For an
+  imported file the only real fix is removing the `@import` line.
+- **Trusting a candidate list without opening the file.** The topic detector reads keywords; it
+  cannot tell a rule that uses a topic from a rule that forbids it. Read the file, then decide.
 - **Calling a rule conditional when it is not.** Marking a rule with `paths:` declares it
   irrelevant to every session that does not touch those globs. A rule about how to conduct
   work is not a "tests rule" because it mentions tests. When in doubt, leave it always-loaded:
@@ -183,6 +214,8 @@ Distillation covers principles 1, 5 and 7. The rest are judgment calls you make 
 - Nothing is ever deleted. The only filesystem writes are: rewriting a file in place (after backing it up) and creating files under `_archive/`.
 - Scripts are plain Node (`.mjs`), zero external dependencies, no `npm install` needed. Node 18+ is enough (uses regex lookbehind and ES modules).
 - `CLAUDE_CODE_CONFIG_DIR` is respected if set; otherwise the global config resolves to `~/.claude`. Pass `--dir` to point at a project's own config instead.
+- Runtime data (`.claude.json`, caches, session transcripts) is never a migration target inside a config directory unless `--include-runtime` is passed.
+- `node tests/run.mjs` runs the regression suite: plain Node, self-building fixtures in a temp directory of its own, non-zero exit on any failure. Run it after changing anything in `scripts/`.
 
 ## Reference files (read on demand)
 
