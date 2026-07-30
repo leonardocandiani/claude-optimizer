@@ -1,6 +1,6 @@
 ---
 name: claude-optimizer
-description: Audits and optimizes a Claude Code configuration (CLAUDE.md, rules/, references/, skills/) for context efficiency, using the three-layer progressive-disclosure model from Thariq's (@trq212) context engineering principles. Use this skill whenever the user asks to audit, clean up, shrink, or optimize their CLAUDE.md or Claude Code config; mentions dead references or broken links inside rules/references; asks whether their config follows context-engineering best practices; wants to find duplicated or contradictory instructions across CLAUDE.md and rules files; or asks to migrate outdated or retired Claude model IDs (e.g. claude-3-5-sonnet-20241022, claude-opus-4-6) to current ones. Also trigger on "context engineering", "system prompt bloat", "shrink my CLAUDE.md", or when the user references the "80% system prompt cut" the Anthropic team made to Claude Code.
+description: Audits and optimizes a Claude Code configuration (CLAUDE.md, rules/, references/, skills/) for context efficiency by applying the seven context-engineering principles: distilling long rules into a principle plus an on-demand reference, resolving over-constrained rules into principles with explicit exceptions, and moving facts that go stale out of the always-loaded prompt. Uses the three-layer progressive-disclosure model from Thariq's (@trq212) context engineering work. Use this skill whenever the user asks to audit, clean up, shrink, or optimize their CLAUDE.md or Claude Code config; mentions dead references or broken links inside rules/references; asks whether their config follows context-engineering best practices; wants to find duplicated or contradictory instructions across CLAUDE.md and rules files; or asks to migrate outdated or retired Claude model IDs (e.g. claude-3-5-sonnet-20241022, claude-opus-4-6) to current ones. Also trigger on "context engineering", "system prompt bloat", "shrink my CLAUDE.md", or when the user references the "80% system prompt cut" the Anthropic team made to Claude Code.
 ---
 
 # Claude Optimizer
@@ -45,7 +45,7 @@ Read-only. Reports:
 - **Dead pointers**: every `rules/*.md`, `references/*.md`, `hooks/*.js`, `skills/<name>` path cited in CLAUDE.md or a rule that does not resolve to a real file. This is the most common and most damaging config defect: telling the agent to open a file that is not there.
 - **Duplication candidates**: near-identical sentences appearing in both CLAUDE.md and an always-loaded rule (heuristic, similarity-scored).
 - **Contradiction candidates**: pairs of lines across always-loaded docs using opposite polarity ("never" vs "always") on the same action verb (heuristic, always flagged for human review, never asserted as certain).
-- **Conditional-rule candidates**: rules whose content is dominated by one file-type keyword family (tests, lint, migrations, CSS, ...) and could gain a `paths:` frontmatter block.
+- **Conditional-rule candidates**: rules whose content is genuinely dominated by one file-type keyword family (tests, lint, migrations, CSS, ...) and could gain a `paths:` frontmatter block. Dominance is measured by density (share of the words), not raw hit count: a long rule about running a project mentions tests in passing without being a tests rule.
 
 ### 2. Migrate model IDs (`scripts/migrate-models.mjs`)
 
@@ -65,9 +65,9 @@ With `--apply`, rewrites the model ID strings in place. Every changed file is co
 node scripts/apply.mjs [--dir <config-dir>] [--apply] [--json]
 ```
 
-The only two corrections this skill ever applies automatically, because both are purely mechanical (no content judgment involved):
-1. Adding a `paths:` frontmatter block to a conditional-rule candidate found by the audit.
-2. Replacing outdated/retired model IDs found inside the config itself.
+By default this applies exactly one correction, because it is the only one that is purely mechanical and cannot change meaning: replacing outdated/retired model IDs found inside the config itself.
+
+Adding a `paths:` frontmatter block is available behind `--conditional-frontmatter`, and it is deliberately opt-in. Marking a rule conditional declares it irrelevant to every session that does not touch those globs; if that judgment is wrong the rule silently stops loading while the byte count improves, which reads as a win and is a regression. Confirm with the user that the rule really is about that file type before applying it.
 
 Dead pointers, duplication, and contradiction candidates are never auto-fixed: deciding what a missing file should contain, which of two near-duplicate sentences to keep, or which side of a contradiction is correct requires a human. Run without `--apply` first, review the plan, then re-run with `--apply`. Every write is preceded by a backup under `_archive/apply-<timestamp>/`, and a `report.json` in that same folder records exactly what changed. Nothing is ever deleted.
 
@@ -75,13 +75,107 @@ Dead pointers, duplication, and contradiction candidates are never auto-fixed: d
 
 Rate-limit impact estimation (how much the config diet actually buys inside the 5h session window and the weekly window), maintained separately. Not part of this skill's audit/migrate/apply flow.
 
+## The distillation pass (this is where the real work happens)
+
+The scripts only handle what a script can decide safely. They will not shrink a config
+that has no mechanical waste left, and on a mature config that is most configs.
+
+**The large reduction comes from this section, and you are the one who performs it.** Do not
+skip it, do not delegate it to `apply.mjs`, and do not tell the user the tool "already
+optimized" their config when all that ran was the model-ID migration.
+
+### When to do it
+
+After `audit.mjs`, look at the always-loaded rules sorted by size. Any rule over ~6 KB is a
+candidate. So is `CLAUDE.md` itself if it is over ~15 KB.
+
+### The one question that decides everything
+
+For each chunk of a rule, ask:
+
+> Does the model need this **in every session**, or only **when the situation comes up**?
+
+That single question implements principles 1, 5 and 7 at once. Almost every long rule is a
+mix of three things, and they belong in three different places:
+
+| What it is | Where it goes | Why |
+|---|---|---|
+| The principle, and the reason behind it | Stays in the rule | This is what changes behaviour |
+| The catalogue: every case, every example, every quote | Moves to `references/` | Needed occasionally, costs on every turn if it stays |
+| Restating something the model already does correctly | Deleted | Competes for attention and buys nothing |
+
+### The procedure
+
+1. **Read the whole rule.** Never distill from the filename or a skim. You are deciding what
+   the user is allowed to forget, so you have to know what is in there.
+2. **Separate principle from catalogue.** A rule that says "never report done without running
+   it, here are 14 times you got this wrong, each with a quote" is one principle and a
+   catalogue. Keep the principle and the reason; the fourteen cases are reference material.
+3. **Write the distilled rule.** Group by theme, lead with the most costly mistake, keep the
+   "why" in one clause. Aim for roughly a quarter of the original, but never at the price of
+   losing a rule that changes behaviour.
+4. **Move the original, do not delete it.** Write the full text to
+   `references/<name>-complete.md` unchanged. Nothing the user taught is lost, it just stops
+   being read on every turn.
+5. **Leave a pointer, and make it work.** The distilled rule opens with a line naming the
+   reference file and when to open it. Use the full path from the config root. A pointer to
+   a file that does not exist is worse than no pointer, and `audit.mjs` will catch it, so
+   re-run the audit after.
+6. **Add the reference to the index.** `CLAUDE.md` gets a short table: file name, and the
+   situation that should make you open it. Progressive disclosure only works if the agent
+   knows the layer exists.
+7. **Measure and report honestly.** Re-run `audit.mjs` and report the real before and after.
+   If the drop is small, say so.
+
+### What to never cut
+
+- **The rule that exists because of an expensive, repeated mistake.** Redundancy on the
+  user's most costly failure is cheap insurance. If a rule about verifying in runtime appears
+  in three files, that is not waste worth 700 bytes, it is the one instruction that must
+  survive a compaction. Leave it.
+- **Anything that encodes a preference you cannot re-derive:** tone of voice, naming
+  conventions, which email to commit with, what the company is called. There is no principle
+  to compress these to. They are facts.
+- **A rule you do not understand.** If you cannot explain what it prevents, you cannot judge
+  whether it is redundant. Ask, or leave it alone.
+
+### Two failure modes to avoid
+
+- **Compressing into vagueness.** "Be careful with deploys" is shorter than the original and
+  worth nothing. A distilled rule is still specific and still actionable; you removed the
+  catalogue, not the content.
+- **Calling a rule conditional when it is not.** Marking a rule with `paths:` declares it
+  irrelevant to every session that does not touch those globs. A rule about how to conduct
+  work is not a "tests rule" because it mentions tests. When in doubt, leave it always-loaded:
+  a wrong `paths:` block silently disables instructions while the byte count improves, which
+  is the worst possible outcome.
+
+## Applying the other principles
+
+Distillation covers principles 1, 5 and 7. The rest are judgment calls you make while reading:
+
+- **Principle 2, do not over-constrain.** When the audit flags a contradiction candidate, the
+  fix is usually not deleting one of the two rules. It is adding the missing exception to the
+  stricter one, so the model stops guessing which applies. "Never delete code without approval"
+  and "delete dead code" both survive once the first one names the exception.
+- **Principle 3, rules become judgment.** A rule that enumerates cases ("valid authorization is:
+  'commit', 'do commit', 'commit this', 'you can commit'") fails on the case it did not list.
+  Replace the list with the principle and one example. Enumerations are a smell: they mean
+  someone patched a miss instead of stating the rule.
+- **Principle 4, examples become interface.** If a rule needs five examples to explain how to
+  call something, the fix is usually in the tool, the command or the naming, not in more text.
+- **Principle 6, moving facts do not belong in the prompt.** Harness limits, version numbers,
+  prices and model IDs go stale silently. Cut them, or move them where they are looked up.
+
 ## How to use this skill in a session
 
 1. Run `audit.mjs` first, always. Show the user the report before touching anything.
 2. If there are dead pointers, duplication, or contradiction candidates: discuss them with the user. These need a decision, not a script.
-3. If there are conditional-rule candidates or outdated model IDs: run `apply.mjs` and `migrate-models.mjs` in dry-run, show the plan, get confirmation, then re-run with `--apply`.
-4. Re-run `audit.mjs` after applying to confirm the always-loaded budget actually dropped, and report the real before/after numbers. Never state a byte or token figure that was not just measured on this machine.
-5. If something looks wrong, the fix is in `_archive/`: the pre-change file is right there, restore it by hand.
+3. If there are outdated model IDs: run `migrate-models.mjs` in dry-run, show the plan, get confirmation, then re-run with `--apply`.
+4. **Do the distillation pass above.** This is the step that actually reduces the config, and it is the step a script cannot do for you. Work rule by rule, show the user each distilled version before writing it.
+5. Only if a rule is genuinely about one file type: run `apply.mjs --conditional-frontmatter` in dry-run, and only apply after the user confirms that rule really is irrelevant to other sessions.
+6. Re-run `audit.mjs` after applying to confirm the always-loaded budget actually dropped, and report the real before/after numbers. Never state a byte or token figure that was not just measured on this machine.
+7. If something looks wrong, the fix is in `_archive/`: the pre-change file is right there, restore it by hand.
 
 ## Safety model
 

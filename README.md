@@ -171,6 +171,29 @@ Every script defaults to dry-run: it reports what it found or what it would do, 
 
 If a change turns out wrong, the previous version of the file is sitting in `_archive/`, restore it by hand.
 
+## The core of it: the distillation pass
+
+Used as a Claude Code skill, the biggest part of this tool is not a script, it is the
+procedure in `SKILL.md` that Claude follows with your judgment in the loop. The scripts
+measure and catch mechanical defects; the distillation pass is what actually shrinks a
+mature config, because deciding what an instruction really needs to say is not something
+a regex can do safely.
+
+The procedure turns one question on every long rule:
+
+> Does the model need this **in every session**, or only **when the situation comes up**?
+
+Almost every long rule is a mix of three things that belong in three different places: the
+principle and its reason (stays), the catalogue of cases, examples and quotes (moves to
+`references/`), and restatements of what the model already does right (deleted). That split
+is principles 1, 5 and 7 of the article applied concretely, and it is where a 30 KB rule
+becomes a 6 KB rule without losing anything the user taught.
+
+`SKILL.md` also carries the guardrails, which matter as much as the method: never cut the
+rule that exists because of an expensive repeated mistake, never cut a preference you cannot
+re-derive (tone, naming, which email commits), never cut a rule you cannot explain, never
+compress into vagueness, and never mark a rule conditional just because it mentions a topic.
+
 ## What you should realistically expect
 
 Be suspicious of any config optimizer that promises a big automatic win, including this one.
