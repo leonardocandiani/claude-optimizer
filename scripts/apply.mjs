@@ -11,6 +11,11 @@
 //   2. model-migration: replace outdated/retired model IDs found inside
 //      the config itself (CLAUDE.md, rules/, references/).
 //
+// Only (2) runs by default. (1) requires --conditional-frontmatter, because
+// deciding a rule is conditional is a judgment about meaning, not a mechanical
+// edit: a wrong glob switches the rule off for most sessions and the byte count
+// goes down while the behaviour quietly degrades.
+//
 // Dead pointers, duplication candidates, and contradiction candidates are
 // NOT applied here: fixing those requires a human decision about what the
 // content should say. apply.mjs only ever performs changes that cannot lose
@@ -18,7 +23,7 @@
 //
 // Usage:
 //   node scripts/apply.mjs [--dir <config-dir>] [--apply] [--json]
-//                          [--skip-conditional-frontmatter] [--skip-migrate-models]
+//                          [--conditional-frontmatter] [--skip-migrate-models]
 //
 // Default is dry-run (prints the plan, writes nothing).
 
@@ -33,7 +38,11 @@ function parseArgs(argv) {
     configDir: resolveConfigDir(argv),
     apply: argv.includes('--apply'),
     json: argv.includes('--json'),
-    skipConditionalFrontmatter: argv.includes('--skip-conditional-frontmatter'),
+    // Opt IN, not opt out. Adding paths: to a rule decides that the rule is
+    // irrelevant to every session that does not touch those globs, and getting
+    // that wrong silently disables the user's instructions. That is a content
+    // judgment, so it never happens unless explicitly asked for.
+    conditionalFrontmatter: argv.includes('--conditional-frontmatter'),
     skipMigrateModels: argv.includes('--skip-migrate-models'),
   };
 }
@@ -163,11 +172,11 @@ function runApply(configDir, plan, json) {
 
 function main() {
   const argv = process.argv.slice(2);
-  const { configDir, apply, json, skipConditionalFrontmatter, skipMigrateModels } = parseArgs(argv);
+  const { configDir, apply, json, conditionalFrontmatter, skipMigrateModels } = parseArgs(argv);
 
   const measured = measureConfig(configDir);
   const plan = [
-    ...(skipConditionalFrontmatter ? [] : planConditionalFrontmatter(measured)),
+    ...(conditionalFrontmatter ? planConditionalFrontmatter(measured) : []),
     ...(skipMigrateModels ? [] : planModelMigration(measured)),
   ];
 

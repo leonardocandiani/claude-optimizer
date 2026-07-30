@@ -337,21 +337,36 @@ function categoryHits(content) {
     .filter((s) => s.count > 0);
 }
 
-// A rule is a conditional-rule candidate when its content is dominated by a
-// single file-type keyword family (and only that family) with enough hits
-// to be a real signal, not a passing mention.
+// Absolute hit counts are a trap. A 30 KB rule about how to run a project can
+// mention "test" a dozen times in passing and still be about everything else,
+// while the category list here only covers file types, so unrelated themes
+// (git, deploy, review) are invisible to it and the rule looks monothematic.
+// Making such a rule conditional silently switches off the user's most
+// important instructions on every session that does not touch a test file,
+// and reports the loss as a saving.
+//
+// So the bar is density, not volume: the category has to own a real share of
+// the words in the file, and there has to be enough of it to not be noise.
+const MIN_HITS = 8;          // below this, one paragraph can trip it
+const MIN_DENSITY = 0.01;    // the topic must be at least 1% of the words
+
 export function findConditionalCandidates(measured) {
   const candidates = [];
   for (const rule of measured.alwaysLoadedRules) {
     const hits = categoryHits(rule.content);
-    if (hits.length === 1 && hits[0].count >= 3) {
-      candidates.push({
-        file: `rules/${rule.name}`,
-        category: hits[0].cat.label,
-        hits: hits[0].count,
-        suggestedPaths: hits[0].cat.suggestedPaths,
-      });
-    }
+    if (hits.length !== 1) continue;
+    const [{ cat, count }] = hits;
+    const words = rule.content.split(/\s+/).filter(Boolean).length || 1;
+    const density = count / words;
+    if (count < MIN_HITS || density < MIN_DENSITY) continue;
+    candidates.push({
+      file: `rules/${rule.name}`,
+      category: cat.label,
+      hits: count,
+      density: Number((density * 100).toFixed(2)),
+      words,
+      suggestedPaths: cat.suggestedPaths,
+    });
   }
   return candidates;
 }

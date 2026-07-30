@@ -55,11 +55,14 @@ Finds retired (HTTP 404), deprecating, and outdated-but-still-active Claude mode
 ### Apply the safe fixes
 
 ```sh
-node scripts/apply.mjs             # dry-run: shows the plan
-node scripts/apply.mjs --apply     # writes it, backs up first, writes a report.json
+node scripts/apply.mjs                                   # dry-run: shows the plan
+node scripts/apply.mjs --apply                           # writes it, backs up first
+node scripts/apply.mjs --conditional-frontmatter --apply # also adds paths: to flagged rules
 ```
 
-Applies exactly two kinds of correction, both mechanical: adding `paths:` frontmatter to a rule the audit flagged as dedicated to one file type, and replacing outdated model IDs found inside the config itself. Dead pointers, duplication, and contradictions are reported but never auto-fixed, deciding what belongs there is a human call.
+By default it applies exactly one kind of correction: replacing outdated model IDs found inside the config itself. That one is purely mechanical and cannot change meaning.
+
+Adding `paths:` frontmatter is available but **opt-in**, via `--conditional-frontmatter`, because it is a judgment about meaning rather than a mechanical edit (see "Why `paths:` is opt-in" below). Dead pointers, duplication, and contradictions are reported but never auto-fixed, deciding what belongs there is a human call.
 
 ### See what the diet actually bought you
 
@@ -167,6 +170,42 @@ Every script defaults to dry-run: it reports what it found or what it would do, 
 - `apply.mjs` additionally writes a `report.json` inside its backup folder recording exactly what changed and why.
 
 If a change turns out wrong, the previous version of the file is sitting in `_archive/`, restore it by hand.
+
+## What you should realistically expect
+
+Be suspicious of any config optimizer that promises a big automatic win, including this one.
+The honest breakdown of where a large reduction actually comes from:
+
+| Change | Who can do it | Typical size |
+|---|---|---|
+| Distilling a long rule into its essentials and moving the full text to `references/` | A human, or Claude with your judgment in the loop | Large. This is where the bytes are. |
+| Removing a rule the model no longer needs told | A human | Medium |
+| Adding `paths:` to a genuinely single-topic rule | This tool suggests, you approve | Small to medium |
+| Fixing dead pointers | This tool finds, you fix | Zero bytes, real correctness win |
+| Migrating outdated model IDs | This tool, automatically | Zero bytes, prevents 404s |
+
+The reference numbers in this README came from a config that went from 84,624 to 57,589
+bytes. **Most of that was distillation, a judgment call about what each rule really needed
+to say, not something any script decided.** Two rules holding 41 KB of catalogued detail
+became 11.7 KB of principles, with the full catalogue moved to `references/` and a pointer
+left behind.
+
+So if you run this and the byte count barely moves, the tool is not broken. It means your
+config has no mechanical waste left, and what remains needs a human to read it and decide
+what it is really for. Run `audit.mjs`, read the duplication and dead-pointer findings, and
+do the distilling with Claude in the loop. That part cannot be safely automated, and this
+tool deliberately does not pretend otherwise.
+
+### Why `paths:` is opt-in
+
+`apply.mjs` will not add `paths:` frontmatter unless you pass `--conditional-frontmatter`.
+Marking a rule conditional declares it irrelevant to every session that does not touch
+those globs. Get it wrong and the rule silently stops loading while the byte count drops,
+which looks like a win and is a regression. An early version of this tool flagged a 30 KB
+rule about running a project as "a tests rule" because it mentioned tests a dozen times in
+passing; applying that would have switched off the user's most important instructions on
+almost every session. The detector now requires topic density rather than raw hit counts,
+and the apply step still asks first.
 
 ## What this does not do
 
