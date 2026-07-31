@@ -86,6 +86,21 @@ By default it applies exactly one kind of correction: replacing outdated model I
 
 Adding `paths:` frontmatter is available but **opt-in**, via `--conditional-frontmatter`, because it is a judgment about meaning rather than a mechanical edit (see "Why `paths:` is opt-in" below). Dead pointers, duplication, and contradictions are reported but never auto-fixed, deciding what belongs there is a human call.
 
+### Prove the distillation lost nothing
+
+```sh
+node scripts/verify-distillation.mjs --before rules/big.md --after rules/big.distilled.md \
+     --into references/big-complete.md
+```
+
+Read-only. Run it **before** overwriting anything, against a copy.
+
+Moving a whole rule into `references/` is trivially safe. The dangerous case is the one a mature config actually hits: the rule already has a companion reference file, so distilling means moving *pieces* into a file that already exists, and a piece that lands nowhere is a fact deleted. It fails silently and in the flattering direction, because the byte count improves and the report says the diet worked.
+
+This extracts the atoms nobody can re-derive from memory (identifiers, paths, commands, emails, URLs, flags) and lists every one present in the original and in none of the files after. Prose is out of scope on purpose: rewording is the whole point of distilling. Exit 2 on any orphan, so it can gate a hook or a test.
+
+Do not substitute your own reading for it. On the run this was written for, a careful manual check found 5 orphans and felt thorough; the script found 23 on the same pair, and three real facts had already been lost, each in a sentence the author was sure carried it.
+
 ### See what the diet actually bought you
 
 ```sh

@@ -142,15 +142,49 @@ mix of three things, and they belong in three different places:
 4. **Move the original, do not delete it.** Write the full text to
    `references/<name>-complete.md` unchanged. Nothing the user taught is lost, it just stops
    being read on every turn.
-5. **Leave a pointer, and make it work.** The distilled rule opens with a line naming the
+
+   **The dangerous variant.** When the rule ALREADY has a companion reference file, you are
+   not moving a whole file, you are moving PIECES into a file that already exists. That is
+   the normal case in a mature config and it is where facts evaporate: a piece that lands
+   nowhere is a fact deleted, the byte count improves, and the report says the diet worked.
+   The loss surfaces months later, when someone needs the org id and it is in no file at all.
+   Never hand-check this. Step 5 does it mechanically.
+
+5. **Prove nothing evaporated (MANDATORY, before you overwrite anything).**
+
+   ```
+   node scripts/verify-distillation.mjs --before <original> --after <distilled> \
+        --into <reference-file> [--into <index>]...
+   ```
+
+   It extracts the atoms a human cannot re-derive from memory (identifiers, paths, commands,
+   emails, URLs, flags) and reports every one present in the original and in none of the
+   files after. Exit 2 means at least one orphan, so it can gate a hook or a test. Prose is
+   out of scope on purpose: rewording is the whole point of distilling, and flagging it would
+   bury the real losses.
+
+   Run it BEFORE overwriting, against a copy. Every orphan gets moved somewhere or is
+   declared disposable out loud, one by one. Then re-run until it exits 0.
+
+   **Do not substitute your own reading for this.** On the run that produced this step, a
+   careful manual check found 5 orphans and felt thorough; the script found 23 on the same
+   pair, and 3 real facts had already been lost by the time it was written: the name of a
+   Supabase org, the path of a hook (the bare filename survived, the path did not), and the
+   exact `gh` command to switch accounts, which the distilled rule referred to without ever
+   giving. Each was a sentence the author was sure carried the fact, and did not.
+
+6. **Leave a pointer, and make it work.** The distilled rule opens with a line naming the
    reference file and when to open it. Use the full path from the config root. A pointer to
    a file that does not exist is worse than no pointer, and `audit.mjs` will catch it, so
    re-run the audit after.
-6. **Add the reference to the index.** `CLAUDE.md` gets a short table: file name, and the
-   situation that should make you open it. Progressive disclosure only works if the agent
-   knows the layer exists.
-7. **Measure and report honestly.** Re-run `audit.mjs` and report the real before and after.
-   If the drop is small, say so.
+7. **Add the reference to the index, and name what moved there.** `CLAUDE.md` gets a short
+   table: file name, and the situation that should make you open it. If the destination
+   gained a new KIND of content (identifiers, discarded alternatives), say so in the trigger
+   line. Progressive disclosure only works if the agent knows the layer exists, and a trigger
+   that undersells what is inside sends you looking in the wrong file.
+8. **Measure and report honestly.** Re-run `audit.mjs` and report the real before and after.
+   If the drop is small, say so. If the index grew because you widened a trigger line, report
+   that too, instead of quoting the number you predicted.
 
 ### What to never cut
 
