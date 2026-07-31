@@ -54,14 +54,30 @@ function buildFrontmatterBlock(suggestedPaths) {
   return lines.join('\n');
 }
 
+// A paths: block only gates files loaded from rules/. Writing one into a file
+// that arrives via @import does nothing to the loading behaviour, but the audit
+// would start discounting those bytes, so the config would look like it lost
+// most of its weight while every instruction kept loading. That is the exact
+// failure mode this tool warns about, so it is blocked here with a test on it.
+function isImported(measured, filePath) {
+  return (measured.imported ?? []).some((f) => f.path === filePath || f.name === filePath);
+}
+
 function planConditionalFrontmatter(measured) {
-  return findConditionalCandidates(measured).map((c) => ({
-    kind: 'conditional-frontmatter',
-    relFile: c.file,
-    file: path.join(measured.configDir, c.file),
-    detail: `${c.category} content (${c.hits} keyword hits)`,
-    suggestedPaths: c.suggestedPaths,
-  }));
+  return findConditionalCandidates(measured)
+    .map((c) => ({
+      kind: 'conditional-frontmatter',
+      relFile: c.file,
+      file: path.join(measured.configDir, c.file),
+      detail: `${c.category} content (${c.hits} keyword hits)`,
+      suggestedPaths: c.suggestedPaths,
+    }))
+    .filter((item) => {
+      if (!isImported(measured, item.file)) return true;
+      console.error(`  SKIPPED ${item.relFile}: reached via @import, paths: has no effect there.`);
+      console.error('           Move it into rules/ if it should really be conditional.');
+      return false;
+    });
 }
 
 function configScanTargets(measured) {

@@ -171,6 +171,38 @@ Every script defaults to dry-run: it reports what it found or what it would do, 
 
 If a change turns out wrong, the previous version of the file is sitting in `_archive/`, restore it by hand.
 
+## Configs that use `@import`
+
+Claude Code lets a `CLAUDE.md` pull in other files with a bare `@path/to/file.md` line, and
+the official docs recommend splitting a large config that way. Those files are injected at
+launch and read on every turn, exactly like the host file.
+
+This tool resolves that graph and counts imported files as always-loaded. It also:
+
+- reports an `@import` pointing at a missing file as a dead pointer, which is the worst
+  defect of all here: the instruction silently never loads and nothing warns you
+- flags a file that carries `paths:` frontmatter but arrives via `@import`. Claude Code
+  strips the frontmatter before injecting, so the field is swallowed in silence and the file
+  keeps loading every turn while its author believes it is conditional. To gate it for real,
+  move it into `rules/`
+- refuses to write `paths:` into an imported file with `apply.mjs`, because that would make
+  the audit discount those bytes while every instruction kept loading: a config that looks
+  dramatically lighter and behaves identically
+- ignores an `@` inside a fenced block, inline code, or an HTML comment, so a code example
+  does not become a phantom import
+
+Files under `context/` that nothing imports still count as on demand, and are never counted
+twice.
+
+## Credits
+
+The `@import` support exists because **Robson Silveira Jr.** ran this tool against a config
+in that format, measured 8,740 bytes where the truth was 99,754, and reported it instead of
+walking away. He also determined experimentally that `paths:` has no effect on an imported
+file, using a 2x2 matrix (imported vs `rules/`, gating vs not) with a positive control
+proving the gate was live in the same run. That result corrected this project's code, and it
+is worth knowing for anyone writing a Claude Code config, not just for this tool.
+
 ## The core of it: the distillation pass
 
 Used as a Claude Code skill, the biggest part of this tool is not a script, it is the

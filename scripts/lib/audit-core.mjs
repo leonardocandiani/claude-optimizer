@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { resolveImports, importedFilesClaimingPaths } from './imports.mjs';
 
 export function bytesOf(str) {
   return Buffer.byteLength(str, 'utf8');
@@ -102,8 +103,20 @@ export function measureConfig(configDir) {
 
   const skills = listSkillDirs(path.join(configDir, 'skills'));
 
+  // Files pulled in with @import are injected at launch and read on every turn,
+  // so they belong in the always-loaded total, not in the conditional bucket.
+  const { imported, missing: brokenImports } = resolveImports(
+    claudeMdPath, claudeMdContent ?? '', configDir,
+  );
+  const importedBytes = imported.reduce((sum, f) => sum + f.bytes, 0);
+  const importedPaths = new Set(imported.map((f) => f.path));
+  const importedClaimingPaths = importedFilesClaimingPaths(imported);
+
   const contextDir = path.join(configDir, 'context');
-  const contextCardFiles = listMarkdownFiles(contextDir);
+  // A context card that nothing imports is genuinely on demand. One that IS
+  // imported is already counted above, so exclude it here to avoid double count.
+  const contextCardFiles = listMarkdownFiles(contextDir)
+    .filter((fp) => !importedPaths.has(path.resolve(fp)));
   const contextCardsBytes = contextCardFiles.reduce(
     (sum, fp) => sum + bytesOf(readFileSafe(fp) ?? ''),
     0,
@@ -125,7 +138,11 @@ export function measureConfig(configDir) {
     skills,
     contextCardFiles,
     contextCardsBytes,
-    alwaysLoadedBytes: claudeMdBytes + alwaysLoadedRulesBytes,
+    imported,
+    importedBytes,
+    brokenImports,
+    importedClaimingPaths,
+    alwaysLoadedBytes: claudeMdBytes + alwaysLoadedRulesBytes + importedBytes,
     alwaysLoadedRulesBytes,
     conditionalBytes,
     referencesBytes,
@@ -163,6 +180,7 @@ function sourceDocs(measured) {
   return [
     { name: 'CLAUDE.md', content: measured.claudeMdContent ?? '' },
     ...measured.alwaysLoadedRules.map((r) => ({ name: `rules/${r.name}`, content: r.content })),
+    ...(measured.imported ?? []).map((f) => ({ name: f.name, content: f.content })),
     ...measured.conditionalRules.map((r) => ({ name: `rules/${r.name}`, content: r.content })),
   ];
 }
@@ -315,6 +333,7 @@ function sourceDocsAlwaysLoadedOnly(measured) {
   return [
     { name: 'CLAUDE.md', content: measured.claudeMdContent ?? '' },
     ...measured.alwaysLoadedRules.map((r) => ({ name: `rules/${r.name}`, content: r.content })),
+    ...(measured.imported ?? []).map((f) => ({ name: f.name, content: f.content })),
   ];
 }
 

@@ -75,6 +75,21 @@ Dead pointers, duplication, and contradiction candidates are never auto-fixed: d
 
 Rate-limit impact estimation (how much the config diet actually buys inside the 5h session window and the weekly window), maintained separately. Not part of this skill's audit/migrate/apply flow.
 
+## Two config formats, one budget
+
+A config can put its always-loaded content in `rules/`, or pull it in from `CLAUDE.md` with
+`@import` lines, or both. Both are read on every turn and both belong in the same budget.
+
+The difference that matters when you advise the user: **`paths:` frontmatter only gates a
+file loaded from `rules/`.** On an imported file the frontmatter is stripped before injection
+and the field is silently ignored, so the file keeps loading. If the user wants a rule to be
+conditional and it currently arrives via `@import`, the fix is to move it into `rules/`, not
+to add `paths:` where it is. The audit flags this case explicitly.
+
+A broken `@import` is the most damaging defect this tool finds: the instruction never loads
+and nothing reports an error. Treat it with the same priority as a dead pointer, because
+that is what it is.
+
 ## The distillation pass (this is where the real work happens)
 
 The scripts only handle what a script can decide safely. They will not shrink a config

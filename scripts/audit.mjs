@@ -57,7 +57,7 @@ function archLine(measured) {
   return 'full three-layer architecture in place (CLAUDE.md -> rules/ -> references/)';
 }
 
-function printBudget(result) {
+function printBudget(result, measured) {
   const b = result.budget;
   console.log('CONTEXT BUDGET');
   console.log(
@@ -69,6 +69,47 @@ function printBudget(result) {
   console.log(`  Skills installed: ${b.skillsCount}`);
   console.log(`  Context cards: ${b.contextCardsCount} (${b.contextCardsBytes} bytes, loaded conditionally by trigger, not part of always-loaded budget)`);
   console.log('');
+  printAlwaysLoadedBreakdown(measured);
+}
+
+// The README tells the user to look at the largest always-loaded documents to
+// decide what to distill, so the tool has to actually produce that list. A total
+// with no breakdown gives the number and hides where to start.
+function printAlwaysLoadedBreakdown(m) {
+  const docs = [
+    ...(m.claudeMdContent ? [{ name: 'CLAUDE.md', bytes: m.claudeMdBytes, via: '' }] : []),
+    ...m.alwaysLoadedRules.map((r) => ({ name: `rules/${r.name}`, bytes: r.bytes, via: '' })),
+    ...(m.imported ?? []).map((f) => ({ name: f.name, bytes: f.bytes, via: ' (@import)' })),
+  ].sort((a, b2) => b2.bytes - a.bytes);
+  if (docs.length === 0) return;
+  const total = docs.reduce((s2, d) => s2 + d.bytes, 0) || 1;
+  console.log('ALWAYS-LOADED DOCUMENTS, LARGEST FIRST');
+  for (const d of docs.slice(0, 12)) {
+    const share = ((d.bytes / total) * 100).toFixed(1).padStart(5);
+    console.log(`  ${String(d.bytes).padStart(7)} bytes  ${share}%  ${d.name}${d.via}`);
+  }
+  if (docs.length > 12) console.log(`  ... and ${docs.length - 12} more`);
+  console.log('');
+
+  const broken = m.brokenImports ?? [];
+  if (broken.length) {
+    console.log('BROKEN @import');
+    console.log(`  ${broken.length} import(s) point to a file that does not exist. The instruction`);
+    console.log('  silently never loads, which is the worst kind of config defect:');
+    for (const b2 of broken) console.log(`    @${b2.spec}  (line ${b2.line})`);
+    console.log('');
+  }
+
+  const claiming = m.importedClaimingPaths ?? [];
+  if (claiming.length) {
+    console.log('paths: ON AN IMPORTED FILE (has no effect)');
+    console.log('  These files carry a paths: frontmatter but are pulled in with @import.');
+    console.log('  Claude Code strips the frontmatter before injecting, so the field is');
+    console.log('  swallowed and the file keeps loading on every turn. To make it');
+    console.log('  conditional for real, move it into rules/:');
+    for (const c of claiming) console.log(`    ${c.name}`);
+    console.log('');
+  }
 }
 
 function printArchitecture(measured) {
@@ -142,7 +183,7 @@ function printTextReport(measured, result) {
   console.log('Claude Optimizer -- Config Audit');
   console.log(`Config dir: ${result.configDir}`);
   console.log('');
-  printBudget(result);
+  printBudget(result, measured);
   printArchitecture(measured);
   printDeadPointers(result.deadPointers);
   printDuplication(result.duplicationCandidates);
