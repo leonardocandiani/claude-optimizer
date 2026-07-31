@@ -60,7 +60,7 @@ function scanFile(file) {
 // A scan root can be a single file (CLAUDE.md, settings.json) or a
 // directory (rules/, references/, ...). Backups are always keyed relative
 // to a directory, so a file root backs up relative to its parent.
-function filesUnderRoot(root) {
+function filesUnderRoot(root, opts = {}) {
   let stat;
   try {
     stat = fs.statSync(root);
@@ -68,14 +68,15 @@ function filesUnderRoot(root) {
     return null;
   }
   if (stat.isFile()) return { backupBase: path.dirname(root), files: [root] };
-  return { backupBase: root, files: [...walkFiles(root)] };
+  return { backupBase: root, files: [...walkFiles(root, opts)] };
 }
 
-function scanRoots(roots) {
+function scanRoots(roots, opts = {}) {
   const findings = [];
   let filesScanned = 0;
+  const skippedCounter = { count: 0 };
   for (const root of roots) {
-    const info = filesUnderRoot(root);
+    const info = filesUnderRoot(root, { ...opts, skippedCounter });
     if (!info) {
       console.error(`Warning: path not found, skipping: ${root}`);
       continue;
@@ -88,7 +89,7 @@ function scanRoots(roots) {
       }
     }
   }
-  return { findings, filesScanned };
+  return { findings, filesScanned, runtimeSkipped: skippedCounter.count };
 }
 
 function severityCounts(findings) {
@@ -188,13 +189,28 @@ function applyReplacements(findings, timestamp) {
 function main() {
   const argv = process.argv.slice(2);
   const { roots, apply, json } = parseArgs(argv);
+  const includeRuntime = argv.includes('--include-runtime');
 
-  const { findings, filesScanned } = scanRoots(roots);
+  const { findings, filesScanned, runtimeSkipped } = scanRoots(roots, { includeRuntime });
+
+  // Scanning zero files used to print "nothing found" and exit 0, which reads
+  // as a clean bill of health when it actually means the scan never happened.
+  if (filesScanned === 0) {
+    console.error('Scanned 0 files. Check the path, or pass --include-runtime if the target is runtime data.');
+    process.exitCode = 1;
+    return;
+  }
 
   if (json) {
-    console.log(JSON.stringify({ roots, filesScanned, apply, findings }, null, 2));
+    console.log(JSON.stringify({ roots, filesScanned, runtimeSkipped, apply, findings }, null, 2));
   } else {
     printReport({ roots, filesScanned, findings, apply });
+    if (runtimeSkipped > 0) {
+      console.log('');
+      console.log(`Skipped ${runtimeSkipped} runtime path(s): session transcripts, caches and telemetry.`);
+      console.log('Those record which model actually ran in the past; rewriting them would falsify history.');
+      console.log('Pass --include-runtime if you really mean to scan them.');
+    }
   }
 
   if (apply && findings.length > 0) {

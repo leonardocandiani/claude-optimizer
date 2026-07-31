@@ -21,6 +21,26 @@ const DEFAULT_EXTENSIONS = new Set([
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2 MB: skip anything that large, it is not a config or source file worth scanning
 
+// Runtime data, not configuration. A Claude Code config directory also holds
+// session transcripts, caches and telemetry; those record which model actually
+// ran on a past session. Rewriting a model ID in there is not a migration, it
+// falsifies a historical record, and it is silent because nobody reads those
+// files by hand. Skipped by default, opt back in with --include-runtime.
+const RUNTIME_DIRS = new Set([
+  'projects', 'sessions', 'todos', 'statsig', 'telemetry', 'logs',
+  'shell-snapshots', 'session-env', 'ide', 'file-history', 'history',
+  'plugins', 'skills_archive', 'tmp',
+]);
+const RUNTIME_FILES = new Set([
+  '.claude.json', 'history.jsonl', 'stats-cache.json', 'gh-pr-status-cache.json',
+]);
+
+export function isRuntimePath(rel) {
+  const parts = rel.split(path.sep).filter(Boolean);
+  if (parts.some((seg) => RUNTIME_DIRS.has(seg))) return true;
+  return RUNTIME_FILES.has(parts[parts.length - 1]);
+}
+
 function readDirSafe(dir) {
   try {
     return fs.readdirSync(dir, { withFileTypes: true });
@@ -54,6 +74,8 @@ function isScannableFile(entry, full, extensions) {
 export function* walkFiles(rootDir, opts = {}) {
   const skipDirs = opts.skipDirs ?? DEFAULT_SKIP_DIRS;
   const extensions = opts.extensions ?? DEFAULT_EXTENSIONS;
+  const includeRuntime = opts.includeRuntime === true;
+  const skipped = opts.skippedCounter;
   const stack = [rootDir];
 
   while (stack.length > 0) {
@@ -61,6 +83,11 @@ export function* walkFiles(rootDir, opts = {}) {
     for (const entry of readDirSafe(dir)) {
       if (entry.isSymbolicLink()) continue;
       const full = path.join(dir, entry.name);
+      const rel = path.relative(rootDir, full);
+      if (!includeRuntime && isRuntimePath(rel)) {
+        if (skipped) skipped.count++;
+        continue;
+      }
       if (isWalkableDir(entry, skipDirs)) {
         stack.push(full);
       } else if (isScannableFile(entry, full, extensions)) {
