@@ -181,5 +181,6 @@
   "apply.skipped": "  OMITIDO {file}: {reason}",
   "apply.updated": "  ACTUALIZADO {file} ({kind})",
   "apply.nothing": "Nada que aplicar.",
-  "apply.dryRunOnly": "Esto fue solo una simulación: no se escribió nada. Para escribir de verdad, vuelve a ejecutar con --apply (antes de cualquier escritura se guarda una copia del archivo original en la carpeta _archive/)."
+  "apply.dryRunOnly": "Esto fue solo una simulación: no se escribió nada. Para escribir de verdad, vuelve a ejecutar con --apply (antes de cualquier escritura se guarda una copia del archivo original en la carpeta _archive/).",
+  "error.partialBaseline": "La instantánea más reciente ({label}) está incompleta: {count} archivo(s) que su CLAUDE.md importa no están ahí, así que medirla inventaría un ahorro que nunca existió. Usa --before-bytes <n> con un tamaño en el que confíes."
 }

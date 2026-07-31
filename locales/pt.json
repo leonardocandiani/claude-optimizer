@@ -181,5 +181,6 @@
   "apply.skipped": "  PULADO {file}: {reason}",
   "apply.updated": "  ATUALIZADO {file} ({kind})",
   "apply.nothing": "Nada a aplicar.",
-  "apply.dryRunOnly": "Isto foi só uma simulação -- nada foi escrito. Para escrever de verdade, rode de novo com --apply (antes de qualquer escrita, uma cópia de segurança do arquivo original vai para a pasta _archive/)."
+  "apply.dryRunOnly": "Isto foi só uma simulação -- nada foi escrito. Para escrever de verdade, rode de novo com --apply (antes de qualquer escrita, uma cópia de segurança do arquivo original vai para a pasta _archive/).",
+  "error.partialBaseline": "A foto mais recente ({label}) está incompleta: {count} arquivo(s) que o CLAUDE.md dela importa não estão lá, então medir por ela inventaria uma economia que nunca existiu. Use --before-bytes <n> com um tamanho em que você confia."
 }

@@ -181,5 +181,6 @@
   "apply.skipped": "  SKIPPED {file}: {reason}",
   "apply.updated": "  UPDATED {file} ({kind})",
   "apply.nothing": "Nothing to apply.",
-  "apply.dryRunOnly": "Dry-run only. Re-run with --apply to write changes (backups go to _archive/ before any write)."
+  "apply.dryRunOnly": "Dry-run only. Re-run with --apply to write changes (backups go to _archive/ before any write).",
+  "error.partialBaseline": "The newest snapshot ({label}) is incomplete: {count} of the files its CLAUDE.md imports are not in it, so measuring it would invent a saving that never happened. Pass --before-bytes <n> with a size you trust instead."
 }
