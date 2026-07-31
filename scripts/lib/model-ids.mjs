@@ -109,28 +109,44 @@ export function fileLooksAnthropicRelated(content) {
 // the team asked to be flagged. These are intentionally narrow (exact
 // parameter tokens) to keep false positives low; they are hints for a human
 // to verify, not proof of a broken call.
+//
+// Each hint carries both a `key` and a `message`. The key is what the text
+// report prints through the translator, so the hint reaches the reader in the
+// language the rest of the report is in -- these lines are the ones that ask
+// for a judgement call, so they are the last place to leave in English.
+// The `message` is the English text, kept verbatim in the --json output: that
+// output is read by machines and by people who did not choose a language, and
+// changing its wording per locale would make it unstable to diff.
 const BREAKING_PATTERN_HINTS = [
   {
     re: /budget_tokens/g,
+    key: 'migrate.hint.budgetTokens',
     message: "uses 'budget_tokens', rejected with 400 on Opus 5 / Fable 5 / Opus 4.7+. Replace with thinking: {type: \"adaptive\"}.",
   },
   {
     re: /\btemperature\s*[:=]/g,
+    key: 'migrate.hint.temperature',
     message: "sets 'temperature', rejected with 400 on Opus 5 / Fable 5 / Opus 4.7+. Remove it.",
   },
   {
     re: /\btop_p\s*[:=]/g,
+    key: 'migrate.hint.topP',
     message: "sets 'top_p', rejected with 400 on Opus 5 / Fable 5 / Opus 4.7+. Remove it.",
   },
   {
     re: /\btop_k\s*[:=]/g,
+    key: 'migrate.hint.topK',
     message: "sets 'top_k', rejected with 400 on Opus 5 / Fable 5 / Opus 4.7+. Remove it.",
   },
 ];
 
+// Exported so a test can assert every hint key really exists in the locale
+// files. A hint whose key is missing would print the raw key to the reader.
+export const BREAKING_HINT_KEYS = BREAKING_PATTERN_HINTS.map((h) => h.key);
+
 export function findBreakingPatternHints(content) {
   const hits = [];
-  for (const { re, message } of BREAKING_PATTERN_HINTS) {
+  for (const { re, key, message } of BREAKING_PATTERN_HINTS) {
     re.lastIndex = 0;
     const seenLines = new Set();
     let m;
@@ -138,7 +154,7 @@ export function findBreakingPatternHints(content) {
       const line = lineNumberAt(content, m.index);
       if (seenLines.has(line)) continue;
       seenLines.add(line);
-      hits.push({ line, message });
+      hits.push({ line, key, message });
     }
   }
   return hits.sort((a, b) => a.line - b.line);

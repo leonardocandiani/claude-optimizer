@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { title, section, bar, compareBars, sparkline, kv, stat, big, callout, color, glyph } from "./render.mjs";
 import { createTranslator } from "./lib/i18n.mjs";
+import { resolveImports } from "./lib/audit-core.mjs";
 
 const args = process.argv.slice(2);
 const flag = (name, def) => {
@@ -61,8 +62,28 @@ function hasPathsFrontmatter(text) {
 
 function measureConfig(dir) {
   let always = 0, conditional = 0, onDemand = 0;
+  let importedCount = 0, unresolvedImports = 0;
   const claudeMd = join(dir, "CLAUDE.md");
-  if (existsSync(claudeMd)) always += statSync(claudeMd).size;
+  if (existsSync(claudeMd)) {
+    always += statSync(claudeMd).size;
+    // Files pulled in with @path are injected at launch, every session, exactly
+    // like an unconditional rule. Counting only CLAUDE.md + rules/ under-reports
+    // an import-based config by an order of magnitude, and under-reporting is the
+    // dangerous direction here: it reads as a lean config and quietly is not.
+    // (paths: in an imported file does NOT gate it -- the frontmatter is dropped
+    // before injection. See the note in lib/audit-core.mjs.)
+    try {
+      const { docs, missing } = resolveImports(readFileSync(claudeMd, "utf8"), dir, dir);
+      for (const d of docs) always += d.bytes;
+      importedCount = docs.length;
+      // A snapshot under _archive/ usually holds only the files that were
+      // rewritten, not the whole context/ tree. Its imports then resolve to
+      // nothing and the "before" silently comes out tiny, which would invent a
+      // saving that never happened. Count what is there, but carry the miss out
+      // so the caller can refuse to use this baseline instead of trusting it.
+      unresolvedImports = missing.length;
+    } catch { /* unreadable CLAUDE.md: fall back to size-only, already counted */ }
+  }
 
   const rulesDir = join(dir, "rules");
   if (existsSync(rulesDir)) {
@@ -82,7 +103,7 @@ function measureConfig(dir) {
       if (f.endsWith(".md")) onDemand += statSync(join(refDir, f)).size;
     }
   }
-  return { always, conditional, onDemand };
+  return { always, conditional, onDemand, importedCount, unresolvedImports };
 }
 
 function findBackupBaseline(dir) {
@@ -98,7 +119,14 @@ function findBackupBaseline(dir) {
     if (!best || st.mtimeMs > best.mtime) best = { path: p, mtime: st.mtimeMs, label: entry };
   }
   if (!best) return null;
-  return { ...measureConfig(best.path), label: best.label };
+  const measured = measureConfig(best.path);
+  // A partial snapshot is worse than no baseline: it produces a "before" that is
+  // missing whole files, so the diet looks bigger than it was. Refuse it and say
+  // why, rather than printing a number that flatters the tool.
+  if (measured.unresolvedImports > 0) {
+    return { ...measured, label: best.label, unusable: true };
+  }
+  return { ...measured, label: best.label };
 }
 
 // ---------- measure real usage ----------
@@ -233,6 +261,13 @@ function main() {
     const backup = findBackupBaseline(CONFIG_DIR);
     if (!backup) {
       console.error(t("error.noBaseline"));
+      process.exit(1);
+    }
+    if (backup.unusable) {
+      // Refusing here is the point: a partial snapshot would still print a
+      // confident number, just a wrong one, in the direction that makes the
+      // tool look good. Better to send the user to --before-bytes.
+      console.error(t("error.partialBaseline", { label: backup.label, count: backup.unresolvedImports }));
       process.exit(1);
     }
     before = backup;

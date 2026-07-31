@@ -29,7 +29,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { resolveConfigDir } from './lib/config-dir.mjs';
+import { resolveConfigDir, flagValue } from './lib/config-dir.mjs';
+import { createTranslator } from './lib/i18n.mjs';
 import { measureConfig, findConditionalCandidates } from './lib/audit-core.mjs';
 import { findModelIdIssues, buildBoundaryRegex } from './lib/model-ids.mjs';
 
@@ -54,14 +55,37 @@ function buildFrontmatterBlock(suggestedPaths) {
   return lines.join('\n');
 }
 
+// paths: frontmatter is a rules/ mechanism. A file that CLAUDE.md pulls in
+// with @import does NOT obey it: writing frontmatter there would look like a
+// saving, load exactly the same bytes on every session, and teach the user to
+// distrust the tool. The remedy for an imported file is in audit.mjs's
+// import-demotion section (delete the @import line), which is a content
+// decision and stays manual.
+//
+// The filter therefore has to test the thing the guarantee is about. "Lives
+// under rules/" is NOT the same claim as "is not imported": the two overlap for
+// most configs and come apart exactly where it hurts, on a rules/ file that
+// CLAUDE.md also pulls in with @rules/x.md. Writing frontmatter there gates
+// nothing, grows the file by the size of the YAML block that gets inlined as
+// literal text, and -- worst of all -- makes the next audit reclassify it as a
+// conditional rule and drop it from the budget. The tool would report a saving
+// while re-creating the very under-reporting this whole change exists to fix.
+// So both conditions are checked, mechanically, on the resolved path.
 function planConditionalFrontmatter(measured) {
-  return findConditionalCandidates(measured).map((c) => ({
-    kind: 'conditional-frontmatter',
-    relFile: c.file,
-    file: path.join(measured.configDir, c.file),
-    detail: `${c.category} content (${c.hits} keyword hits)`,
-    suggestedPaths: c.suggestedPaths,
-  }));
+  const rulePaths = new Set(measured.rules.map((r) => path.resolve(r.path)));
+  const importedPaths = measured.importedPaths ?? new Set();
+  return findConditionalCandidates(measured)
+    .map((c) => ({
+      kind: 'conditional-frontmatter',
+      relFile: c.file,
+      file: path.join(measured.configDir, c.file),
+      detail: `${c.category} content (${c.hits} keyword hits)`,
+      suggestedPaths: c.suggestedPaths,
+    }))
+    .filter((item) => {
+      const abs = path.resolve(item.file);
+      return rulePaths.has(abs) && !importedPaths.has(abs);
+    });
 }
 
 function configScanTargets(measured) {
@@ -123,35 +147,35 @@ function applyPlanItem(item, configDir, backupRoot) {
   return { ...item, skipped: false, backupPath: dest };
 }
 
-function printPlan(configDir, plan) {
-  console.log('Claude Optimizer -- Apply');
-  console.log(`Config dir: ${configDir}`);
-  console.log('Mode: dry-run');
+function printPlan(t, configDir, plan) {
+  console.log(t('apply.title'));
+  console.log(t('apply.configDir', { dir: configDir }));
+  console.log(t('apply.modeDryRun'));
   console.log('');
   if (plan.length === 0) {
-    console.log('No safe, mechanical corrections found to apply.');
-    console.log('(Dead pointers, duplication, and contradiction candidates need a human decision, apply.mjs does not touch those.)');
+    console.log(t('apply.none'));
+    console.log(t('apply.noneNote'));
     return;
   }
-  console.log(`${plan.length} correction(s) planned:`);
+  console.log(t('apply.planned', { count: plan.length }));
   for (const item of plan) {
     console.log(`  [${item.kind}] ${item.relFile}: ${item.detail}`);
   }
 }
 
-function printApplied(applied, backupRoot) {
+function printApplied(t, applied, backupRoot) {
   const changed = applied.filter((a) => !a.skipped).length;
-  console.log(`Applied ${changed} change(s). Backups + report: ${backupRoot}`);
+  console.log(t('apply.applied', { count: changed, backupRoot }));
   for (const a of applied) {
-    if (a.skipped) console.log(`  SKIPPED ${a.relFile}: ${a.reason}`);
-    else console.log(`  UPDATED ${a.relFile} (${a.kind})`);
+    if (a.skipped) console.log(t('apply.skipped', { file: a.relFile, reason: a.reason }));
+    else console.log(t('apply.updated', { file: a.relFile, kind: a.kind }));
   }
 }
 
-function runApply(configDir, plan, json) {
+function runApply(t, configDir, plan, json) {
   if (plan.length === 0) {
     if (json) console.log(JSON.stringify({ configDir, apply: true, applied: [] }, null, 2));
-    else console.log('Nothing to apply.');
+    else console.log(t('apply.nothing'));
     return;
   }
 
@@ -167,12 +191,18 @@ function runApply(configDir, plan, json) {
   );
 
   if (json) console.log(JSON.stringify({ configDir, timestamp, backupRoot, applied }, null, 2));
-  else printApplied(applied, backupRoot);
+  else printApplied(t, applied, backupRoot);
 }
 
 function main() {
   const argv = process.argv.slice(2);
   const { configDir, apply, json, conditionalFrontmatter, skipMigrateModels } = parseArgs(argv);
+
+  // Same rule as audit.mjs: the language comes from the config being acted on,
+  // so operating on someone else's config speaks that config's language. This
+  // is the script that WRITES, so its warnings are the ones that most need to
+  // be readable by whoever owns the config.
+  const { t } = createTranslator({ explicit: flagValue(argv, '--lang'), configDir });
 
   const measured = measureConfig(configDir);
   const plan = [
@@ -183,14 +213,14 @@ function main() {
   if (!apply) {
     if (json) console.log(JSON.stringify({ configDir, apply: false, plan }, null, 2));
     else {
-      printPlan(configDir, plan);
+      printPlan(t, configDir, plan);
       console.log('');
-      console.log('Dry-run only. Re-run with --apply to write changes (backups go to _archive/ before any write).');
+      console.log(t('apply.dryRunOnly'));
     }
     return;
   }
 
-  runApply(configDir, plan, json);
+  runApply(t, configDir, plan, json);
 }
 
 main();
